@@ -5,12 +5,13 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import pygame
 from pygame.math import Vector2, Vector3
 
-from .config import CameraConfig, GameConfig, PhysicsConfig, RenderingConfig, WindConfig
+from .config import BirdConfig, CameraConfig, GameConfig, PhysicsConfig, RenderingConfig, WindConfig
 from .input import InputProvider, InputState, KeyboardInput
 
 
@@ -92,6 +93,7 @@ class BackgroundFeature:
     width: float
     height: float
     color: tuple[int, int, int]
+    variant: int = 0
 
 
 class SceneryManager:
@@ -131,6 +133,7 @@ class SceneryManager:
             weights=(0.4, 0.35, 0.25),
         )[0]
 
+        variant = 0
         if kind == "cloud":
             x = random.uniform(-9.0, 9.0)
             y = random.uniform(4.0, 7.0)
@@ -143,6 +146,7 @@ class SceneryManager:
             height = random.uniform(3.0, 4.5)
             width = height * random.uniform(0.18, 0.28)
             color = self.cfg.tree_color
+            variant = random.randrange(256)
         else:  # tower
             x = self._sample_x(-14.0, 14.0, exclusion=5.0)
             y = self.cfg.ground_plane
@@ -156,6 +160,7 @@ class SceneryManager:
             width=width,
             height=height,
             color=color,
+            variant=variant,
         )
 
     def update(self, player_forward: float) -> None:
@@ -168,6 +173,7 @@ class SceneryManager:
                 feature.width = refreshed.width
                 feature.height = refreshed.height
                 feature.color = refreshed.color
+                feature.variant = refreshed.variant
 
     def draw(self, surface: pygame.Surface, camera: "Camera") -> None:
         for feature in self.features:
@@ -313,6 +319,81 @@ class WindParticleSystem:
                 max(1, int(particle.size)),
             )
 
+
+@dataclass
+class BirdObstacle:
+    """Represents a single bird perched on the rope."""
+
+    forward: float
+    lateral: float
+    scale: float
+    bob_phase: float
+
+
+class BirdManager:
+    """Handles spawning, updating, and collision detection for bird obstacles."""
+
+    def __init__(self, config: BirdConfig, physics: PhysicsConfig) -> None:
+        self.config = config
+        self.physics = physics
+        self.birds: list[BirdObstacle] = []
+        self._next_spawn_forward: float = 0.0
+
+    def reset(self, player_forward: float) -> None:
+        self.birds.clear()
+        self._next_spawn_forward = player_forward + self.config.initial_gap
+        self._ensure_spawn_window(player_forward)
+
+    def update(self, dt: float, player_forward: float) -> None:
+        despawn_limit = player_forward - self.config.despawn_buffer
+        if despawn_limit > -1e6:
+            self.birds = [bird for bird in self.birds if bird.forward >= despawn_limit]
+
+        for bird in self.birds:
+            bird.bob_phase = (bird.bob_phase + dt * self.config.bob_speed) % (math.tau)
+
+        self._ensure_spawn_window(player_forward)
+
+    def _ensure_spawn_window(self, player_forward: float) -> None:
+        target = player_forward + self.config.spawn_window
+        if self._next_spawn_forward <= player_forward + self.config.initial_gap * 0.5:
+            self._next_spawn_forward = player_forward + self.config.initial_gap
+
+        while self._next_spawn_forward < target:
+            self.birds.append(self._spawn_bird(self._next_spawn_forward))
+            spacing = random.uniform(self.config.min_spacing, self.config.max_spacing)
+            self._next_spawn_forward += spacing
+
+    def _spawn_bird(self, forward: float) -> BirdObstacle:
+        lateral = random.uniform(-self.config.lateral_variance, self.config.lateral_variance)
+        scale = random.uniform(self.config.scale_min, self.config.scale_max)
+        bob_phase = random.uniform(0.0, math.tau)
+        return BirdObstacle(forward=forward, lateral=lateral, scale=scale, bob_phase=bob_phase)
+
+    def check_collision(self, player: "Player") -> bool:
+        collision = False
+        remaining: list[BirdObstacle] = []
+        for bird in self.birds:
+            if bird.forward < player.forward - self.config.despawn_buffer:
+                continue
+
+            dz = abs(player.forward - bird.forward)
+            lateral_diff = abs(player.lateral_offset - bird.lateral)
+            hitbox_forward = self.config.hitbox_forward * bird.scale
+            hitbox_lateral = self.config.hitbox_lateral * bird.scale
+
+            if dz <= hitbox_forward and lateral_diff <= hitbox_lateral:
+                if (not player.on_rope) or player.vertical_offset >= self.config.safe_jump_height:
+                    # Successfully jumped over the bird; it flies away.
+                    continue
+                collision = True
+                continue
+
+            remaining.append(bird)
+
+        self.birds = remaining
+        return collision
+
 class Player:
     """Handles the tightrope walker's physics state."""
 
@@ -439,6 +520,7 @@ class Renderer:
         physics: PhysicsConfig,
         scenery: SceneryManager,
         wind: WindConfig,
+        birds: BirdManager,
     ) -> None:
         self.surface = surface
         self.cfg = config
@@ -447,7 +529,22 @@ class Renderer:
         self.physics = physics
         self.scenery = scenery
         self.wind_cfg = wind
+        self.birds = birds
+        self.bird_cfg = birds.config
         self.wind_particles = WindParticleSystem(self.cfg.wind_color, wind.max_torque, self.surface.get_size())
+        self.asset_root = Path(__file__).resolve().parent.parent / "assets"
+        bird_path = self.asset_root / "pixel_bird.png"
+        if not bird_path.exists():
+            raise FileNotFoundError(f"Bird sprite not found at {bird_path}")
+        self.bird_sprite = pygame.image.load(str(bird_path)).convert_alpha()
+        self._bird_sprite_cache: dict[tuple[int, bool], pygame.Surface] = {}
+        self.cloud_sprite = self._load_sprite("Clouds.png")
+        self.tree_frames = self._load_tree_frames()
+        self.player_sprite = self._load_sprite("player_sprite.png")
+        self.player_sprite_anchor = (0.5, 1.0)
+        self._cloud_sprite_cache: dict[object, pygame.Surface] = {}
+        self._tree_sprite_cache: dict[object, pygame.Surface] = {}
+        self._player_sprite_cache: dict[object, pygame.Surface] = {}
         self.font = pygame.font.Font(None, 32)
         self.large_font = pygame.font.Font(None, 64)
 
@@ -463,8 +560,9 @@ class Renderer:
         self.wind_particles.resize(self.surface.get_size())
         self.surface.fill(self.cfg.background_color)
         self._draw_horizon()
-        self.scenery.draw(self.surface, self.camera)
+        self._draw_scenery()
         self._draw_rope()
+        self._draw_birds()
         self._draw_player()
         self.wind_particles.update(dt, gust, wind_torque, waiting_for_start)
         self.wind_particles.draw(self.surface)
@@ -473,11 +571,160 @@ class Renderer:
 
     def _draw_horizon(self) -> None:
         width, height = self.surface.get_size()
+        sky_height = int(height * 0.6)
+        pygame.draw.rect(self.surface, self.cfg.horizon_color, pygame.Rect(0, 0, width, sky_height))
         pygame.draw.rect(
             self.surface,
-            self.cfg.horizon_color,
-            pygame.Rect(0, 0, width, int(height * 0.6)),
+            self.cfg.ground_color,
+            pygame.Rect(0, sky_height, width, height - sky_height),
         )
+
+    def _draw_scenery(self) -> None:
+        depth_sorted: list[tuple[float, BackgroundFeature]] = []
+        for feature in self.scenery.features:
+            relative = feature.position - self.camera.position
+            if relative.z <= 0.1:
+                continue
+            depth_sorted.append((relative.z, feature))
+
+        for _, feature in sorted(depth_sorted, key=lambda item: item[0], reverse=True):
+            self._draw_background_feature(feature)
+
+    def _draw_background_feature(self, feature: BackgroundFeature) -> None:
+        relative = feature.position - self.camera.position
+        if relative.z <= 0.1:
+            return
+        factor = self.camera.cfg.fov / relative.z
+
+        if feature.kind == "cloud":
+            centre = self.camera.project(feature.position)
+            if not centre:
+                return
+            if self.cloud_sprite:
+                pixel_height = max(6, int(feature.height * factor))
+                aspect = self.cloud_sprite.get_width() / max(1, self.cloud_sprite.get_height())
+                pixel_width = max(6, int(pixel_height * aspect))
+                sprite = self._get_scaled_sprite(
+                    self.cloud_sprite, self._cloud_sprite_cache, pixel_width, pixel_height
+                )
+                rect = sprite.get_rect(center=(int(centre.x), int(centre.y)))
+                self.surface.blit(sprite, rect)
+            else:
+                pixel_width = max(6, int(feature.width * factor))
+                pixel_height = max(6, int(feature.height * factor))
+                rect = pygame.Rect(0, 0, pixel_width, pixel_height)
+                rect.center = (int(centre.x), int(centre.y))
+                pygame.draw.ellipse(self.surface, self.cfg.cloud_color, rect)
+            return
+
+        base = self.camera.project(feature.position)
+        top = self.camera.project(feature.position + Vector3(0.0, feature.height, 0.0))
+        if not base or not top:
+            return
+
+        pixel_height = max(4, int(base.y - top.y))
+        if feature.kind == "tree":
+            if self.tree_frames and pixel_height > 0:
+                frame_index = feature.variant % len(self.tree_frames)
+                base_frame = self.tree_frames[frame_index]
+                base_w, base_h = base_frame.get_size()
+                if base_h == 0:
+                    return
+                aspect = base_w / base_h
+                if base_w <= 32 and base_h <= 32:
+                    pixel_height = max(3, int(pixel_height * 0.65))
+                pixel_width = max(3, int(pixel_height * aspect))
+                sprite = self._get_scaled_sprite(
+                    base_frame,
+                    self._tree_sprite_cache,
+                    pixel_width,
+                    pixel_height,
+                    key_extra=(frame_index, base_w, base_h),
+                )
+                rect = sprite.get_rect()
+                rect.midbottom = (int(base.x), int(base.y))
+                self.surface.blit(sprite, rect)
+            else:
+                trunk_width = max(1, int(pixel_height * 0.25))
+                trunk_height = int(pixel_height * 0.45)
+                trunk_rect = pygame.Rect(0, 0, trunk_width, max(1, trunk_height))
+                trunk_rect.midbottom = (int(base.x), int(base.y))
+                pygame.draw.rect(self.surface, (120, 80, 45), trunk_rect)
+                canopy_rect = pygame.Rect(0, 0, trunk_width * 2, max(1, pixel_height - trunk_height // 2))
+                canopy_rect.midbottom = (int(base.x), int(base.y - trunk_height * 0.4))
+                pygame.draw.ellipse(self.surface, self.cfg.tree_color, canopy_rect)
+            return
+
+        width_px = max(4, int(feature.width * factor))
+        rect = pygame.Rect(0, 0, width_px, pixel_height)
+        rect.midbottom = (int(base.x), int(base.y))
+        pygame.draw.rect(self.surface, self.cfg.building_color, rect)
+
+    def _load_tree_frames(self) -> list[pygame.Surface]:
+        frames: list[pygame.Surface] = []
+        specs = [
+            ("trees.png", (4, 2)),
+            ("trees_large.png", (4, 1)),
+        ]
+        for filename, (cols, rows) in specs:
+            sheet = self._load_sprite(filename)
+            if not sheet:
+                continue
+            frames.extend(self._slice_sprite_sheet(sheet, cols, rows))
+        return frames
+
+    def _slice_sprite_sheet(
+        self,
+        sheet: pygame.Surface,
+        columns: int,
+        rows: int,
+    ) -> list[pygame.Surface]:
+        if columns <= 0 or rows <= 0:
+            return [sheet]
+        tile_w = sheet.get_width() // columns
+        tile_h = sheet.get_height() // rows
+        if tile_w <= 0 or tile_h <= 0:
+            return [sheet]
+
+        frames: list[pygame.Surface] = []
+        for row in range(rows):
+            for col in range(columns):
+                rect = pygame.Rect(col * tile_w, row * tile_h, tile_w, tile_h)
+                frame = pygame.Surface((tile_w, tile_h), pygame.SRCALPHA)
+                frame.blit(sheet, (0, 0), rect)
+                if self._surface_has_pixels(frame):
+                    frames.append(frame)
+        return frames or [sheet]
+
+    @staticmethod
+    def _surface_has_pixels(surface: pygame.Surface) -> bool:
+        mask = pygame.mask.from_surface(surface)
+        return mask.count() > 0
+
+    def _get_scaled_sprite(
+        self,
+        source: pygame.Surface,
+        cache: dict[object, pygame.Surface],
+        width: int,
+        height: int,
+        key_extra: Optional[tuple[int, int, int]] = None,
+        smooth: bool = True,
+    ) -> pygame.Surface:
+        key = (key_extra, width, height, smooth) if key_extra is not None else (width, height, smooth)
+        sprite = cache.get(key)
+        if sprite is None:
+            if smooth:
+                sprite = pygame.transform.smoothscale(source, (width, height))
+            else:
+                sprite = pygame.transform.scale(source, (width, height))
+            cache[key] = sprite
+        return sprite
+
+    def _load_sprite(self, filename: str) -> Optional[pygame.Surface]:
+        path = self.asset_root / filename
+        if not path.exists():
+            return None
+        return pygame.image.load(str(path)).convert_alpha()
 
     def _draw_rope(self) -> None:
         segments = self.cfg.rope_segments
@@ -511,9 +758,45 @@ class Renderer:
     def _draw_player(self) -> None:
         head = self.player.head_position()
         feet = self.player.feet_position()
+        centre = self.player.world_centre()
         head_proj = self.camera.project(head)
         feet_proj = self.camera.project(feet)
-        if head_proj and feet_proj:
+        drew_sprite = False
+
+        relative = centre - self.camera.position
+        if self.player_sprite and feet_proj and relative.z > 0.1:
+            factor = self.camera.cfg.fov / relative.z
+            sprite_height_world = self.cfg.player_sprite_height
+            pixel_height = max(12, int(sprite_height_world * factor))
+            aspect = self.player_sprite.get_width() / max(1, self.player_sprite.get_height())
+            pixel_width = max(8, int(pixel_height * aspect))
+            sprite = self._get_scaled_sprite(
+                self.player_sprite,
+                self._player_sprite_cache,
+                pixel_width,
+                pixel_height,
+                smooth=False,
+            )
+            angle_deg = math.degrees(self.player.lean_angle)
+            # Rotate around the sprite's foot (midbottom)
+            angle_for_transform = -angle_deg
+            rotated = pygame.transform.rotozoom(sprite, angle_for_transform, 1.0)
+            sprite_rect = sprite.get_rect()
+            anchor_x, anchor_y = self.player_sprite_anchor
+            pivot = pygame.Vector2(sprite_rect.width * anchor_x, sprite_rect.height * anchor_y)
+            center = pygame.Vector2(sprite_rect.center)
+            offset = pivot - center
+            rotated_offset = offset.rotate(angle_for_transform)
+            lateral_shift = math.sin(self.player.lean_angle) * self.physics.lean_sprite_offset * factor
+            rotated_rect = rotated.get_rect()
+            rotated_rect.center = (
+                feet_proj.x - rotated_offset.x + lateral_shift,
+                feet_proj.y - rotated_offset.y,
+            )
+            self.surface.blit(rotated, rotated_rect)
+            drew_sprite = True
+
+        if not drew_sprite and head_proj and feet_proj:
             pygame.draw.line(self.surface, self.cfg.player_color, head_proj, feet_proj, 10)
 
         left_pole, right_pole = self.player.pole_endpoints()
@@ -524,8 +807,49 @@ class Renderer:
 
         # Draw a small marker at the feet for better depth perception.
         centre_proj = self.camera.project(self.player.world_centre())
-        if centre_proj:
+        if centre_proj and not drew_sprite:
             pygame.draw.circle(self.surface, self.cfg.player_color, centre_proj, 12)
+
+    def _draw_birds(self) -> None:
+        base_height = self.physics.rope_radius + self.bird_cfg.perch_height
+        base_sprite_height = self.bird_sprite.get_height()
+        base_sprite_width = self.bird_sprite.get_width()
+        for bird in self.birds.birds:
+            centre = Vector3(bird.lateral, base_height, bird.forward)
+            relative = centre - self.camera.position
+            if relative.z <= 0.1:
+                continue
+            factor = self.camera.cfg.fov / relative.z
+            sprite_height_world = self.bird_cfg.sprite_height * bird.scale
+            pixel_height = max(2, int(sprite_height_world * factor))
+            if pixel_height <= 2:
+                continue
+            aspect = base_sprite_width / base_sprite_height
+            pixel_width = max(2, int(pixel_height * aspect))
+
+            base_key = (pixel_height, False)
+            sprite = self._bird_sprite_cache.get(base_key)
+            if sprite is None:
+                sprite = pygame.transform.scale(self.bird_sprite, (pixel_width, pixel_height))
+                self._bird_sprite_cache[base_key] = sprite
+
+            facing_right = bird.lateral <= 0
+            cache_key = (pixel_height, facing_right)
+            draw_sprite = self._bird_sprite_cache.get(cache_key)
+            if draw_sprite is None:
+                if facing_right:
+                    draw_sprite = pygame.transform.flip(sprite, True, False)
+                else:
+                    draw_sprite = sprite
+                self._bird_sprite_cache[cache_key] = draw_sprite
+
+            perch_world = Vector3(bird.lateral, self.physics.rope_radius + 0.01, bird.forward)
+            perch_proj = self.camera.project(perch_world)
+            if not perch_proj:
+                continue
+            rect = draw_sprite.get_rect()
+            rect.midbottom = (int(perch_proj.x), int(perch_proj.y))
+            self.surface.blit(draw_sprite, rect)
 
     def _draw_wind(self, gust: Optional[WindGust]) -> None:
         if not gust:
@@ -556,11 +880,13 @@ class Renderer:
             instructions = [
                 "Press any key to begin balancing.",
                 "Controls: A/Left = lean left, D/Right = lean right, Space = jump",
+                "Jump over birds to avoid getting knocked off.",
             ]
         else:
             instructions = [
                 "Controls: A/Left = lean left, D/Right = lean right, Space = jump",
                 "Press R to reset at any time.",
+                "Jump over birds to avoid getting knocked off.",
             ]
         width, height = self.surface.get_size()
         for idx, line in enumerate(instructions):
@@ -643,6 +969,8 @@ class TightropeGame:
         self.player = Player(self.physics)
         self.camera = Camera(self.config.camera, self.physics, self.config.window_size)
         self.scenery = SceneryManager(self.config.render)
+        self.birds = BirdManager(self.config.birds, self.physics)
+        self.birds.reset(self.player.forward)
         self.renderer = Renderer(
             self.screen,
             self.config.render,
@@ -651,6 +979,7 @@ class TightropeGame:
             self.physics,
             self.scenery,
             self.config.wind,
+            self.birds,
         )
         self.wind = WindManager(self.config.wind)
         self.input_provider = input_provider or KeyboardInput()
@@ -668,6 +997,8 @@ class TightropeGame:
         self.wind = WindManager(self.config.wind)
         self.camera = Camera(self.config.camera, self.physics, self.config.window_size)
         self.scenery = SceneryManager(self.config.render)
+        self.birds = BirdManager(self.config.birds, self.physics)
+        self.birds.reset(self.player.forward)
         self.renderer = Renderer(
             self.screen,
             self.config.render,
@@ -676,6 +1007,7 @@ class TightropeGame:
             self.physics,
             self.scenery,
             self.config.wind,
+            self.birds,
         )
         if hasattr(self.input_provider, "reset"):
             self.input_provider.reset()  # type: ignore[attr-defined]
@@ -715,6 +1047,12 @@ class TightropeGame:
                     self.game_over = True
             else:
                 self.camera.update(dt, self.player)
+
+            self.birds.update(dt, self.player.forward)
+            if not self.waiting_for_start and not self.game_over:
+                if self.birds.check_collision(self.player):
+                    self.player.fallen = True
+                    self.game_over = True
 
             if not self.waiting_for_start:
                 self.scenery.update(self.player.forward)
