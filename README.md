@@ -1,7 +1,8 @@
 # Fist time: from the project root
+'''
 source ".venv/bin/activate"
 python -m pip install -r requirements.txt
-
+'''
 # Afterwards entering the virtual environment
 source .venv/bin/activate
 
