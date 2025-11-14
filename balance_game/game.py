@@ -1077,6 +1077,9 @@ class TightropeGame:
 
             pygame.display.flip()
 
+        if hasattr(self.input_provider, "shutdown"):
+            self.input_provider.shutdown()  # type: ignore[attr-defined]
+
         pygame.quit()
 
     def _handle_events(self) -> None:

@@ -69,6 +69,31 @@ class BirdConfig:
 
 
 @dataclass(frozen=True)
+class BrainLinkConfig:
+    """Runtime parameters for BrainLink blink detection."""
+
+    host: str = "127.0.0.1"
+    port: int = 13854
+    blink_threshold: int = 55
+    min_signal_quality: int = 0  # poorSignalLevel must be <= this (0 is best)
+    blink_cooldown: float = 0.75  # seconds between blink events
+    blink_hold: float = 0.25  # seconds jump stays active after blink
+    reconnect_backoff: float = 2.0  # seconds before retrying connection
+
+
+@dataclass(frozen=True)
+class SocketInputConfig:
+    """Settings for the JSON socket control interface."""
+
+    host: str = "127.0.0.1"  # interface to bind
+    port: int = 4789  # TCP port to listen on
+    backlog: int = 1
+    read_timeout: float = 0.5
+    reconnect_delay: float = 0.5
+    max_idle_seconds: float = 0.8  # how long remote commands remain fresh
+
+
+@dataclass(frozen=True)
 class RenderingConfig:
     """Visual parameters for the pseudo-3D renderer."""
 
@@ -104,4 +129,6 @@ class GameConfig:
     physics: PhysicsConfig = field(default_factory=PhysicsConfig)
     wind: WindConfig = field(default_factory=WindConfig)
     birds: BirdConfig = field(default_factory=BirdConfig)
+    brainlink: BrainLinkConfig = field(default_factory=BrainLinkConfig)
+    socket_input: SocketInputConfig = field(default_factory=SocketInputConfig)
     render: RenderingConfig = field(default_factory=RenderingConfig)
