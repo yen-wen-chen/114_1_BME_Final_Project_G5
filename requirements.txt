@@ -1,3 +1,2 @@
 pygame==2.6.1
-NeuroSkyPy==1.6
-
+pyserial==3.5

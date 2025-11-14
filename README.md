@@ -20,7 +20,13 @@ python main.py --socket-input --socket-port 4789
 
 ```
 source .venv/bin/activate
-python tools/neuroskypy_socket_bridge.py --serial-port /dev/cu.BrainLink_Lite --profile assets/blink_energy_profile.json --game-port 4789 --verbose
+python tools/brainlink_serial_bridge.py \
+    --serial-port /dev/cu.BrainLink_Lite \
+    --profile assets/blink_energy_profile.json \
+    --game-port 4789 \
+    --verbose \
+    --debug-sensors
+
 ```
 
 
@@ -111,29 +117,30 @@ The socket layer stacks with the keyboard and blink input, so you can fall back 
 4. 桥接腳本會把每次眨眼（能量短暫下降）轉成 `{"jump": true}` 的 JSON 指令送進遊戲的 socket。
    你也可以在自訂模組中利用 `packet["rawEeg"]` 自行處理特徵。
 
-## 直接用 NeuroSkyPy 連 BrainLink（不用 ThinkGear Connector）
+## 直接用 BrainLinkParser 連 BrainLink（不用 ThinkGear Connector）
 
 1. 安裝需求（只需一次）：
    ```bash
    source .venv/bin/activate
    pip install -r requirements.txt
    ```
-2. 查詢 BrainLink/MindWave 的藍牙序列埠名稱（macOS 通常是 `/dev/tty.MindWaveMobile-SerialPort`）。
+2. 用 `ls /dev/cu.*` 找到 BrainLink 的序列埠（例如 `/dev/cu.BrainLink_Lite`）。
 3. 啟動遊戲 socket：
    ```bash
    python main.py --socket-input
    ```
-4. 使用我們提供的橋接程式，直接透過 NeuroSkyPy 讀取 BrainLink：
+4. 使用 `tools/brainlink_serial_bridge.py` 直接解析 BrainLink 的串列資料並送進遊戲：
    ```bash
-   python tools/neuroskypy_socket_bridge.py \
-       --serial-port /dev/tty.MindWaveMobile-SerialPort \
+   python tools/brainlink_serial_bridge.py \
+       --serial-port /dev/cu.BrainLink_Lite \
        --profile assets/blink_energy_profile.json \
        --game-port 4789 \
+       --verbose \
        --model-module your_ml_module   # 若沒有可省略
    ```
 
-   - 腦波 raw 資料會直接經 `EnergyBlinkDetector` 做能量尖峰偵測 → 觸發 jump。
-   - 如果提供 `--model-module`，請在該模組內定義 `predict(packet: dict) -> dict`，回傳 `{"lean": …}` 等欄位即可。
-   - 沒有能量 profile 時，會 fallback 成以 `blinkStrength` 閾值判斷眨眼。
+   - 腦波 raw 資料會經 `EnergyBlinkDetector` 做能量尖峰偵測 → 觸發 jump。
+   - `--model-module` 可定義 `predict(packet: dict) -> dict`，回傳 `{"lean": …}` 等欄位；未指定時預設用 attention 值轉 lean。
+   - 沒有 profile 時會 fallback 用 `blinkStrength >= threshold` 判斷眨眼。
 
-> 注意：NeuroSkyPy 需要正確的藍牙 Serial Port，且腳本關閉時會自動釋放連線；若要結束，按 `Ctrl+C` 即可。
+> 如果橋接程式顯示 `Connection refused`，代表你還沒啟動 `python main.py --socket-input`；請先開遊戲 socket 再啟橋接。
