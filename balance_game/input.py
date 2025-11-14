@@ -58,6 +58,9 @@ class KeyboardInput(InputProvider):
         """Reset smoothed input state."""
         self._current = 0.0
 
+    @property
+    def status_text(self) -> str:
+        return "Keyboard input active"
 
 class BrainLinkBlinkInput(InputProvider):
     """Augments a base input provider with blink-triggered jumps via BrainLink."""
@@ -100,6 +103,18 @@ class BrainLinkBlinkInput(InputProvider):
     def connected(self) -> bool:
         return self.client.connected
 
+    @property
+    def status_text(self):
+        status = f"BrainLink: {'connected' if self.connected else 'connecting'}"
+        if self._blink_timer > 0:
+            status += " (blink)"
+        base_status = getattr(self.base, "status_text", None)
+        if base_status:
+            if isinstance(base_status, list):
+                return [status, *base_status]
+            return [status, base_status]
+        return status
+
 
 class SocketInput(InputProvider):
     """Listens for JSON control messages over TCP to drive the game."""
@@ -117,6 +132,7 @@ class SocketInput(InputProvider):
         self._jump_latch = 0.0
         self._running = threading.Event()
         self._running.set()
+        self._status_text = "Socket: waiting"
         self._thread = threading.Thread(target=self._run_server, name="SocketInput", daemon=True)
         self._thread.start()
 
@@ -238,3 +254,12 @@ class SocketInput(InputProvider):
                     self._jump_latch = min(self._jump_latch, 0.1)
             self._latest = InputState(lean=lean, jump=jump)
             self._last_update = now
+            self._status_text = f"Socket: lean={lean:+.2f} jump={jump} age=0.00s"
+
+    @property
+    def status_text(self) -> str:
+        with self._lock:
+            age = time.perf_counter() - self._last_update if self._last_update else None
+            if age is None:
+                return f"Socket [{self.cfg.host}:{self.cfg.port}]: waiting"
+            return f"Socket [{self.cfg.host}:{self.cfg.port}]: lean={self._latest.lean:+.2f} jump={self._latest.jump} age={age:.2f}s"

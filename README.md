@@ -20,10 +20,7 @@ python main.py --socket-input --socket-port 4789
 
 ```
 source .venv/bin/activate
-python tools/neuroskypy_socket_bridge.py \
-    --serial-port /dev/cu.BrainLink_Lite \
-    --profile assets/blink_energy_profile.json \
-    --game-port 4789
+python tools/neuroskypy_socket_bridge.py --serial-port /dev/cu.BrainLink_Lite --profile assets/blink_energy_profile.json --game-port 4789 --verbose
 ```
 
 

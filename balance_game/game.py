@@ -6,7 +6,7 @@ import math
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import pygame
 from pygame.math import Vector2, Vector3
@@ -547,6 +547,7 @@ class Renderer:
         self._player_sprite_cache: dict[object, pygame.Surface] = {}
         self.font = pygame.font.Font(None, 32)
         self.large_font = pygame.font.Font(None, 64)
+        self.status_source: Optional[Callable[[], list[str]]] = None
 
     def draw(
         self,
@@ -895,6 +896,13 @@ class Renderer:
             rect.bottomleft = (24, height - 24 - idx * 26)
             self.surface.blit(surf, rect)
 
+        status_lines = self.status_source() if self.status_source else []
+        for idx, line in enumerate(status_lines):
+            surf = self.font.render(line, True, self.cfg.ui_color)
+            rect = surf.get_rect()
+            rect.bottomright = (width - 24, height - 24 - idx * 26)
+            self.surface.blit(surf, rect)
+
     def _draw_lean_chart(self, history: list[float]) -> None:
         if not history:
             return
@@ -981,6 +989,8 @@ class TightropeGame:
             self.config.wind,
             self.birds,
         )
+        self.renderer.status_source = self._get_input_status_lines
+        self.renderer.status_source = self._get_input_status_lines
         self.wind = WindManager(self.config.wind)
         self.input_provider = input_provider or KeyboardInput()
 
@@ -1119,3 +1129,12 @@ class TightropeGame:
         subtitle = self.renderer.font.render("Lean with A/D, jump with Space, press R to reset.", True, (225, 225, 225))
         subtitle_rect = subtitle.get_rect(center=(width // 2, height // 2 + 28))
         self.screen.blit(subtitle, subtitle_rect)
+
+    def _get_input_status_lines(self) -> list[str]:
+        provider = self.input_provider
+        status = getattr(provider, "status_text", None)
+        if not status:
+            return []
+        if isinstance(status, (list, tuple)):
+            return [str(line) for line in status]
+        return [str(status)]
