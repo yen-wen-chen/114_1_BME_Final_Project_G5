@@ -11,7 +11,15 @@ from typing import Callable, Optional
 import pygame
 from pygame.math import Vector2, Vector3
 
-from .config import BirdConfig, CameraConfig, GameConfig, PhysicsConfig, RenderingConfig, WindConfig
+from .config import (
+    BirdConfig,
+    CameraConfig,
+    ChallengeConfig,
+    GameConfig,
+    PhysicsConfig,
+    RenderingConfig,
+    WindConfig,
+)
 from .input import InputProvider, InputState, KeyboardInput
 
 
@@ -128,10 +136,8 @@ class SceneryManager:
             self.features.append(self._random_feature(z))
 
     def _random_feature(self, z: float) -> BackgroundFeature:
-        kind = random.choices(
-            population=("cloud", "tree", "tower"),
-            weights=(0.4, 0.35, 0.25),
-        )[0]
+        # Disable tree generation for now; only spawn clouds.
+        kind = "cloud"
 
         variant = 0
         if kind == "cloud":
@@ -141,19 +147,12 @@ class SceneryManager:
             height = width * random.uniform(0.45, 0.65)
             color = self.cfg.cloud_color
         elif kind == "tree":
-            x = self._sample_x(-5.0, 5.0, exclusion=2.0)
-            y = self.cfg.ground_plane + 0.1
+            x = self._sample_x(-15.0, 15.0, exclusion=2.0)
+            y = self.cfg.ground_plane - 12g.45  # place trees slightly lower to hug the ground
             height = random.uniform(3.0, 4.5)
             width = height * random.uniform(0.18, 0.28)
             color = self.cfg.tree_color
             variant = random.randrange(256)
-        else:  # tower
-            x = self._sample_x(-14.0, 14.0, exclusion=5.0)
-            y = self.cfg.ground_plane
-            height = random.uniform(9.0, 15.0)
-            width = height * random.uniform(0.35, 0.55)
-            color = self.cfg.building_color
-
         return BackgroundFeature(
             kind=kind,
             position=Vector3(x, y, z),
@@ -270,7 +269,7 @@ class WindParticleSystem:
                 survivors.append(particle)
         self.particles = survivors
 
-        if paused or not gust or torque == 0.0:
+        if paused or torque == 0.0:
             return
 
         intensity = max(0.0, min(1.0, abs(torque) / self.max_torque))
@@ -338,6 +337,8 @@ class BirdManager:
         self.physics = physics
         self.birds: list[BirdObstacle] = []
         self._next_spawn_forward: float = 0.0
+        self.enabled: bool = True
+        self.density: float = 1.0
 
     def reset(self, player_forward: float) -> None:
         self.birds.clear()
@@ -345,6 +346,9 @@ class BirdManager:
         self._ensure_spawn_window(player_forward)
 
     def update(self, dt: float, player_forward: float) -> None:
+        if not self.enabled:
+            self.birds.clear()
+            return
         despawn_limit = player_forward - self.config.despawn_buffer
         if despawn_limit > -1e6:
             self.birds = [bird for bird in self.birds if bird.forward >= despawn_limit]
@@ -355,13 +359,16 @@ class BirdManager:
         self._ensure_spawn_window(player_forward)
 
     def _ensure_spawn_window(self, player_forward: float) -> None:
+        if not self.enabled:
+            return
         target = player_forward + self.config.spawn_window
         if self._next_spawn_forward <= player_forward + self.config.initial_gap * 0.5:
             self._next_spawn_forward = player_forward + self.config.initial_gap
 
         while self._next_spawn_forward < target:
             self.birds.append(self._spawn_bird(self._next_spawn_forward))
-            spacing = random.uniform(self.config.min_spacing, self.config.max_spacing)
+            density_factor = max(0.1, self.density)
+            spacing = random.uniform(self.config.min_spacing, self.config.max_spacing) / density_factor
             self._next_spawn_forward += spacing
 
     def _spawn_bird(self, forward: float) -> BirdObstacle:
@@ -371,6 +378,8 @@ class BirdManager:
         return BirdObstacle(forward=forward, lateral=lateral, scale=scale, bob_phase=bob_phase)
 
     def check_collision(self, player: "Player") -> bool:
+        if not self.enabled:
+            return False
         collision = False
         remaining: list[BirdObstacle] = []
         for bird in self.birds:
@@ -400,6 +409,9 @@ class Player:
     def __init__(self, physics: PhysicsConfig) -> None:
         self.cfg = physics
         self.half_height = physics.player_height * 0.5
+        self.dynamic_speed = physics.forward_speed
+        self.recover_timer = 0.0
+        self.recover_input = 0.0
         self.reset()
 
     def reset(self) -> None:
@@ -411,13 +423,24 @@ class Player:
         self.lateral_offset = 0.0
         self.on_rope = True
         self.fallen = False
+        self.override_lean: Optional[float] = None
+        self.recover_timer = 0.0
+        self.recover_input = 0.0
 
     def update(self, dt: float, inputs: InputState, wind_torque: float) -> None:
         if self.fallen:
             return
 
+        # Apply recovery override if active
+        lean_input = inputs.lean
+        if self.recover_timer > 0:
+            self.recover_timer -= dt
+            lean_input = self.recover_input
+        elif self.override_lean is not None:
+            lean_input = self.override_lean
+
         torque = self.cfg.gravity_torque * math.sin(self.lean_angle)
-        control_torque = inputs.lean * self.cfg.input_torque
+        control_torque = lean_input * self.cfg.input_torque
         if not self.on_rope:
             control_torque *= self.cfg.jump_air_control
         torque += control_torque
@@ -432,7 +455,9 @@ class Player:
         self.lean_angle += self.angular_velocity * dt
 
         lateral_scale = self.cfg.player_height * 0.18
-        self.lateral_offset = math.sin(self.lean_angle) * lateral_scale
+        base_offset = math.sin(self.lean_angle) * lateral_scale
+        drift = -math.sin(self.lean_angle) * self.cfg.lateral_drift
+        self.lateral_offset = base_offset + drift
 
         if inputs.jump and self.on_rope:
             self.on_rope = False
@@ -450,7 +475,7 @@ class Player:
                 self.vertical_velocity = 0.0
                 self.on_rope = True
 
-        self.forward += self.cfg.forward_speed * dt
+        self.forward += self.dynamic_speed * dt
 
         if abs(self.lean_angle) > self.cfg.max_angle_radians and self.on_rope:
             self.fallen = True
@@ -545,8 +570,9 @@ class Renderer:
         self._cloud_sprite_cache: dict[object, pygame.Surface] = {}
         self._tree_sprite_cache: dict[object, pygame.Surface] = {}
         self._player_sprite_cache: dict[object, pygame.Surface] = {}
-        self.font = pygame.font.Font(None, 32)
-        self.large_font = pygame.font.Font(None, 64)
+        self._bg_sprite: Optional[pygame.Surface] = None
+        self._bg_scaled: Optional[tuple[tuple[int, int], pygame.Surface]] = None
+        self.font, self.large_font = self._load_fonts()
         self.status_source: Optional[Callable[[], list[str]]] = None
 
     def draw(
@@ -559,8 +585,7 @@ class Renderer:
         lean_history: list[float],
     ) -> None:
         self.wind_particles.resize(self.surface.get_size())
-        self.surface.fill(self.cfg.background_color)
-        self._draw_horizon()
+        self._draw_background()
         self._draw_scenery()
         self._draw_rope()
         self._draw_birds()
@@ -570,7 +595,18 @@ class Renderer:
         self._draw_ui(gust, fps, waiting_for_start)
         self._draw_lean_chart(lean_history)
 
-    def _draw_horizon(self) -> None:
+    def _draw_background(self) -> None:
+        bg_path = self.asset_root / "game background.png"
+        if bg_path.exists():
+            if self._bg_sprite is None:
+                self._bg_sprite = pygame.image.load(str(bg_path)).convert()
+                self._bg_scaled = None
+            size = self.surface.get_size()
+            if self._bg_scaled is None or self._bg_scaled[0] != size:
+                self._bg_scaled = (size, pygame.transform.smoothscale(self._bg_sprite, size))
+            self.surface.blit(self._bg_scaled[1], (0, 0))
+            return
+
         width, height = self.surface.get_size()
         sky_height = int(height * 0.6)
         pygame.draw.rect(self.surface, self.cfg.horizon_color, pygame.Rect(0, 0, width, sky_height))
@@ -727,6 +763,21 @@ class Renderer:
             return None
         return pygame.image.load(str(path)).convert_alpha()
 
+    def _load_fonts(self) -> tuple[pygame.font.Font, pygame.font.Font]:
+        font_dir = self.asset_root / "8bit"
+        if font_dir.exists() and font_dir.is_dir():
+            candidates = list(font_dir.glob("*.ttf")) + list(font_dir.glob("*.otf"))
+            if candidates:
+                font_path = str(candidates[0])
+                try:
+                    base = pygame.font.Font(font_path, 32)
+                    large = pygame.font.Font(font_path, 72)
+                    return base, large
+                except Exception:
+                    pass
+        # fallback to default font
+        return pygame.font.Font(None, 32), pygame.font.Font(None, 64)
+
     def _draw_rope(self) -> None:
         segments = self.cfg.rope_segments
         seg_length = self.cfg.rope_length / segments
@@ -812,6 +863,8 @@ class Renderer:
             pygame.draw.circle(self.surface, self.cfg.player_color, centre_proj, 12)
 
     def _draw_birds(self) -> None:
+        if not self.birds.enabled:
+            return
         base_height = self.physics.rope_radius + self.bird_cfg.perch_height
         base_sprite_height = self.bird_sprite.get_height()
         base_sprite_width = self.bird_sprite.get_width()
@@ -978,6 +1031,8 @@ class TightropeGame:
         self.camera = Camera(self.config.camera, self.physics, self.config.window_size)
         self.scenery = SceneryManager(self.config.render)
         self.birds = BirdManager(self.config.birds, self.physics)
+        self.birds.enabled = True
+        self.birds.density = 1.0
         self.birds.reset(self.player.forward)
         self.renderer = Renderer(
             self.screen,
@@ -990,17 +1045,40 @@ class TightropeGame:
             self.birds,
         )
         self.renderer.status_source = self._get_input_status_lines
-        self.renderer.status_source = self._get_input_status_lines
         self.wind = WindManager(self.config.wind)
         self.input_provider = input_provider or KeyboardInput()
 
         self.running = True
         self.game_over = False
-        self.waiting_for_start = True
+        self.waiting_for_start = False
+        self.in_menu = True
+        self.menu_state = "main"
+        self.menu_index = 0
+        self.selected_mode = "challenge"
+        self.speed_multiplier = 1.0
+        self.birds_enabled = True
+        self.birds_density = 1.0
         self.current_wind_torque = 0.0
         self.max_history_samples = max(90, int(self.config.target_fps * 6))
         self.lean_history: list[float] = []
         self._record_lean(0.0)
+        self.challenge_timer = self._next_challenge_interval()
+        self.challenge_active = False
+        self.challenge_direction = 0
+        self.challenge_window = self.config.challenge.window_duration
+        self.challenge_samples: list[float] = []
+        self.challenge_input_dir = 0
+        self.menu_buttons: dict[str, pygame.Rect] = {}
+        self.challenge_reset_timer = 0.0
+        self.challenge_script: list[tuple[float, float]] = []
+        self.challenge_script_timer = 0.0
+        self.challenge_script_input = 0.0
+        self.settings_index = 0
+
+        # keep renderer references in sync
+        self.renderer.player = self.player
+        self.renderer.camera = self.camera
+        self.renderer.scenery = self.scenery
 
     def reset(self) -> None:
         self.player.reset()
@@ -1008,6 +1086,8 @@ class TightropeGame:
         self.camera = Camera(self.config.camera, self.physics, self.config.window_size)
         self.scenery = SceneryManager(self.config.render)
         self.birds = BirdManager(self.config.birds, self.physics)
+        self.birds.enabled = getattr(self, "birds_enabled", True)
+        self.birds.density = getattr(self, "birds_density", 1.0)
         self.birds.reset(self.player.forward)
         self.renderer = Renderer(
             self.screen,
@@ -1019,42 +1099,282 @@ class TightropeGame:
             self.config.wind,
             self.birds,
         )
+        self.renderer.status_source = self._get_input_status_lines
         if hasattr(self.input_provider, "reset"):
             self.input_provider.reset()  # type: ignore[attr-defined]
         self.game_over = False
-        self.waiting_for_start = True
+        self.waiting_for_start = False
+        self.in_menu = False
+        self.menu_state = "main"
+        self.menu_index = 0
         self.current_wind_torque = 0.0
         self.lean_history = []
         self._record_lean(0.0)
+        self.challenge_timer = self._next_challenge_interval()
+        self.challenge_active = False
+        self.challenge_samples = []
+        self.challenge_input_dir = 0
+        self.menu_buttons = {}
+        self.challenge_reset_timer = 0.0
+        self.selected_mode = "challenge"
+        self.challenge_script = []
+        self.challenge_script_timer = 0.0
+        self.challenge_script_input = 0.0
+        self.settings_index = 0
 
     def _record_lean(self, angle: float) -> None:
         self.lean_history.append(angle)
         if len(self.lean_history) > self.max_history_samples:
             self.lean_history.pop(0)
 
+    def _menu_key(self, key: int) -> None:
+        if self.menu_state == "main":
+            options = [
+                ("play", "Play"),
+                ("mode", f"Mode: {'Challenge' if self.selected_mode == 'challenge' else 'Normal'}"),
+                ("settings", "Settings"),
+                ("others", "Others"),
+            ]
+            if key == pygame.K_UP:
+                self.menu_index = (self.menu_index - 1) % len(options)
+            elif key == pygame.K_DOWN:
+                self.menu_index = (self.menu_index + 1) % len(options)
+            elif key in (pygame.K_LEFT, pygame.K_RIGHT):
+                if options[self.menu_index][0] == "mode":
+                    self.selected_mode = "challenge" if self.selected_mode == "normal" else "normal"
+            elif key in (pygame.K_RETURN, pygame.K_SPACE):
+                current = options[self.menu_index][0]
+                if current == "play":
+                    self._start_game_from_menu()
+                elif current == "mode":
+                    self.selected_mode = "challenge" if self.selected_mode == "normal" else "normal"
+                elif current == "settings":
+                    self.menu_state = "settings"
+                    self.settings_index = 0
+                elif current == "others":
+                    self.menu_state = "others"
+        elif self.menu_state == "settings":
+            options = ["speed", "birds_enabled", "bird_density"]
+            if key == pygame.K_UP:
+                self.settings_index = (self.settings_index - 1) % len(options)
+            elif key == pygame.K_DOWN:
+                self.settings_index = (self.settings_index + 1) % len(options)
+            elif key == pygame.K_LEFT:
+                current = options[self.settings_index]
+                if current == "speed":
+                    self.speed_multiplier = max(0.5, self.speed_multiplier - 0.1)
+                elif current == "bird_density":
+                    self.birds_density = max(0.2, round(self.birds_density - 0.1, 1))
+            elif key == pygame.K_RIGHT:
+                current = options[self.settings_index]
+                if current == "speed":
+                    self.speed_multiplier = min(2.0, self.speed_multiplier + 0.1)
+                elif current == "bird_density":
+                    self.birds_density = min(3.0, round(self.birds_density + 0.1, 1))
+            elif key in (pygame.K_RETURN, pygame.K_SPACE):
+                current = options[self.settings_index]
+                if current == "birds_enabled":
+                    self.birds_enabled = not self.birds_enabled
+                else:
+                    # Hitting enter on non-toggle items exits settings for convenience.
+                    self.menu_state = "main"
+            elif key in (pygame.K_BACKSPACE, pygame.K_ESCAPE):
+                self.menu_state = "main"
+            # Apply live updates to the active bird manager
+            self.birds.enabled = self.birds_enabled
+            self.birds.density = self.birds_density
+        elif self.menu_state == "others":
+            if key in (pygame.K_BACKSPACE, pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
+                self.menu_state = "main"
+
+    def _menu_click(self, pos: tuple[int, int]) -> None:
+        if not self.menu_buttons:
+            return
+        for name, rect in self.menu_buttons.items():
+            if rect.collidepoint(pos):
+                if self.menu_state == "main":
+                    if name == "play":
+                        self._start_game_from_menu()
+                    elif name == "mode":
+                        self.selected_mode = "challenge" if self.selected_mode == "normal" else "normal"
+                    elif name == "settings":
+                        self.menu_state = "settings"
+                        self.settings_index = 0
+                    elif name == "others":
+                        self.menu_state = "others"
+                elif self.menu_state == "settings":
+                    if name == "birds_enabled":
+                        self.birds_enabled = not self.birds_enabled
+                    elif name == "bird_density":
+                        pass  # use keys to adjust density
+                    elif name == "speed":
+                        pass
+                    self.birds.enabled = self.birds_enabled
+                    self.birds.density = self.birds_density
+                break
+
+    def _next_challenge_interval(self) -> float:
+        if self.selected_mode != "challenge":
+            return 1e9
+        return random.uniform(self.config.challenge.min_interval, self.config.challenge.max_interval)
+
+    def _start_game_from_menu(self) -> None:
+        # Recreate core objects to avoid stale references
+        self.player = Player(self.physics)
+        self.player.dynamic_speed = self.physics.forward_speed * self.speed_multiplier
+        self.player.override_lean = None
+        self.camera = Camera(self.config.camera, self.physics, self.config.window_size)
+        self.scenery = SceneryManager(self.config.render)
+        self.birds = BirdManager(self.config.birds, self.physics)
+        self.birds.enabled = self.birds_enabled
+        self.birds.density = self.birds_density
+        self.birds.reset(self.player.forward)
+
+        self.renderer = Renderer(
+            self.screen,
+            self.config.render,
+            self.camera,
+            self.player,
+            self.physics,
+            self.scenery,
+            self.config.wind,
+            self.birds,
+        )
+        self.renderer.status_source = self._get_input_status_lines
+
+        # Reset state flags
+        if hasattr(self.input_provider, "reset"):
+            self.input_provider.reset()  # type: ignore[attr-defined]
+        self.game_over = False
+        self.in_menu = False
+        self.waiting_for_start = False
+        self.challenge_active = False
+        self.challenge_input_dir = 0
+        self.challenge_timer = self._next_challenge_interval()
+        self.challenge_window = self.config.challenge.window_duration
+        self.challenge_direction = 0
+        self.challenge_samples = []
+        self.current_wind_torque = 0.0
+        self.lean_history = []
+        self._record_lean(0.0)
+
+    def _maybe_trigger_challenge(self, dt: float, inputs: InputState) -> None:
+        if self.selected_mode != "challenge":
+            return
+        if self.challenge_active:
+            return
+        if self.challenge_script or self.challenge_script_timer > 0:
+            return
+        if not self.player.on_rope:
+            return
+        self.challenge_timer -= dt
+        if self.challenge_timer <= 0:
+            self.challenge_active = True
+            self.challenge_window = self.config.challenge.window_duration
+            self.challenge_direction = random.choice([-1, 1])
+            self.challenge_samples = []
+            self.player.override_lean = 0.0
+            self.challenge_input_dir = 0
+
+    def _update_challenge(self, dt: float) -> None:
+        self.challenge_window -= dt
+        # hold camera but did not move; collect lean samples
+        inputs = self.input_provider.poll(dt)
+        if inputs.lean < -0.2:
+            self.challenge_input_dir = -1
+        elif inputs.lean > 0.2:
+            self.challenge_input_dir = 1
+        if self.challenge_window <= 0:
+            self._resolve_challenge()
+
+    def _apply_challenge_script(self, dt: float, inputs: InputState) -> InputState:
+        """Apply scripted lean inputs after a challenge resolution."""
+        if self.challenge_script_timer <= 0 and self.challenge_script:
+            duration, direction = self.challenge_script.pop(0)
+            self.challenge_script_timer = duration
+            self.challenge_script_input = direction
+
+        if self.challenge_script_timer > 0:
+            self.challenge_script_timer -= dt
+            if self.challenge_script_timer <= 0:
+                # proceed to next step on the following frame
+                self.challenge_script_input = 0.0
+            return InputState(lean=self.challenge_script_input, jump=inputs.jump)
+
+        # script finished
+        self.challenge_script_input = 0.0
+        return inputs
+
+    def _resolve_challenge(self) -> None:
+        choice_dir = self.challenge_input_dir
+        # Correct input should match the incoming wind direction (visual wind).
+        wind_visual_dir = -self.challenge_direction
+        required = wind_visual_dir
+
+        wind_time = self.config.challenge.wind_simulated_time
+        player_time = self.config.challenge.player_simulated_time
+        wind_dir = wind_visual_dir
+        second_dir = choice_dir
+
+        # Build a scripted input sequence: first wind pushes, then player's choice.
+        self.challenge_script = [
+            (wind_time, float(wind_dir)),
+            (player_time, float(second_dir)),
+        ]
+        self.challenge_script_timer = 0.0
+        self.challenge_script_input = 0.0
+
+        # Reset immediate forces; let the scripted inputs drive the outcome.
+        self.player.override_lean = None
+        self.player.recover_timer = 0.0
+        self.player.recover_input = 0.0
+        self.challenge_active = False
+        self.challenge_timer = self._next_challenge_interval()
+        self.challenge_reset_timer = self.config.challenge.reset_delay
+        self.challenge_input_dir = 0
+
     def run(self) -> None:
         while self.running:
             dt = self.clock.tick(self.config.target_fps) / 1000.0
             fps = self.clock.get_fps()
-            self._handle_events()
+            events = pygame.event.get()
+            self._handle_events(events)
+
+            if self.in_menu:
+                self._draw_menu()
+                pygame.display.flip()
+                continue
 
             wind_torque = 0.0
             gust: Optional[WindGust] = None
 
             if not self.waiting_for_start:
-                wind_torque, gust = self.wind.update(dt)
-                gust = gust or self.wind.active_gust
+                if self.selected_mode == "challenge":
+                    wind_torque, gust = 0.0, None
+                else:
+                    wind_torque, gust = self.wind.update(dt)
+                    gust = gust or self.wind.active_gust
             else:
                 gust = None
 
             if self.waiting_for_start:
                 self.camera.update(dt, self.player)
             elif not self.game_over:
-                inputs = self.input_provider.poll(dt)
-                self.player.update(dt, inputs, wind_torque)
-                self.camera.update(dt, self.player)
-                if self.player.fallen:
-                    self.game_over = True
+                if self.challenge_active:
+                    self._update_challenge(dt)
+                else:
+                    inputs = self.input_provider.poll(dt)
+                    # Challenge mode: ignore lean until an event triggers; scripted inputs take over after judgment.
+                    if self.selected_mode == "challenge":
+                        if not self.player.on_rope:
+                            wind_torque, gust = 0.0, None
+                        inputs = InputState(lean=0.0, jump=inputs.jump)
+                        inputs = self._apply_challenge_script(dt, inputs)
+                    self._maybe_trigger_challenge(dt, inputs)
+                    self.player.update(dt, inputs, wind_torque)
+                    self.camera.update(dt, self.player)
+                    if self.player.fallen:
+                        self.game_over = True
             else:
                 self.camera.update(dt, self.player)
 
@@ -1064,12 +1384,19 @@ class TightropeGame:
                     self.player.fallen = True
                     self.game_over = True
 
-            if not self.waiting_for_start:
+            if not self.waiting_for_start and not self.challenge_active:
                 self.scenery.update(self.player.forward)
 
             self.current_wind_torque = wind_torque if not self.waiting_for_start else 0.0
             current_angle = 0.0 if self.waiting_for_start else self.player.lean_angle
             self._record_lean(current_angle)
+
+            if self.challenge_reset_timer > 0:
+                self.challenge_reset_timer -= dt
+                if self.challenge_reset_timer <= 0:
+                    self.player.lean_angle = 0.0
+                    self.player.angular_velocity = 0.0
+                    self.player.override_lean = None
 
             self.renderer.draw(
                 dt,
@@ -1084,6 +1411,8 @@ class TightropeGame:
                 self._draw_start_prompt()
             elif self.game_over:
                 self._draw_game_over()
+            elif self.challenge_active:
+                self._draw_challenge_overlay(dt)
 
             pygame.display.flip()
 
@@ -1092,19 +1421,36 @@ class TightropeGame:
 
         pygame.quit()
 
-    def _handle_events(self) -> None:
-        for event in pygame.event.get():
+    def _handle_events(self, events: list[pygame.event.Event]) -> None:
+        for event in events:
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     self.running = False
+                elif self.in_menu:
+                    self._menu_key(event.key)
                 elif self.waiting_for_start:
                     self.waiting_for_start = False
                 elif event.key == pygame.K_r:
                     self.reset()
                 elif self.game_over and event.key in (pygame.K_SPACE, pygame.K_RETURN):
                     self.reset()
+                elif event.key == pygame.K_m:
+                    # Runtime toggle between normal and challenge
+                    self.selected_mode = "challenge" if self.selected_mode == "normal" else "normal"
+                    self.challenge_active = False
+                    self.challenge_input_dir = 0
+                    self.challenge_timer = self._next_challenge_interval()
+                    self.challenge_window = self.config.challenge.window_duration
+                elif self.challenge_active:
+                    if event.key in (pygame.K_a, pygame.K_LEFT):
+                        self.challenge_input_dir = -1
+                    elif event.key in (pygame.K_d, pygame.K_RIGHT):
+                        self.challenge_input_dir = 1
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if self.in_menu:
+                    self._menu_click(event.pos)
 
     def _draw_game_over(self) -> None:
         width, height = self.screen.get_size()
@@ -1129,6 +1475,88 @@ class TightropeGame:
         subtitle = self.renderer.font.render("Lean with A/D, jump with Space, press R to reset.", True, (225, 225, 225))
         subtitle_rect = subtitle.get_rect(center=(width // 2, height // 2 + 28))
         self.screen.blit(subtitle, subtitle_rect)
+
+    def _draw_background(self) -> None:
+        # Delegate to renderer's background draw for menu use
+        if hasattr(self.renderer, "_draw_background"):
+            self.renderer._draw_background()
+
+    def _draw_menu(self) -> None:
+        width, height = self.screen.get_size()
+        self._draw_background()
+        overlay = pygame.Surface((width, height), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))
+        self.screen.blit(overlay, (0, 0))
+
+        title = self.renderer.large_font.render("Tightrope Balance", True, (240, 240, 240))
+        self.screen.blit(title, title.get_rect(center=(width // 2, height // 2 - 120)))
+
+        if self.menu_state == "main":
+            option_defs = [
+                ("play", "Play"),
+                ("mode", f"Mode: {'Challenge' if self.selected_mode == 'challenge' else 'Normal'}"),
+                ("settings", "Settings"),
+                ("others", "Others"),
+            ]
+            self.menu_buttons = {}
+            for idx, (key, text) in enumerate(option_defs):
+                color = (255, 255, 255) if idx == self.menu_index else (200, 200, 200)
+                surf = self.renderer.font.render(text, True, color)
+                rect = surf.get_rect(center=(width // 2, height // 2 - 40 + idx * 50))
+                self.menu_buttons[key] = rect
+                self.screen.blit(surf, rect)
+            hint = "Up/Down select, Enter confirm, Left/Right toggles mode"
+            surf_hint = self.renderer.font.render(hint, True, (210, 210, 210))
+            self.screen.blit(surf_hint, surf_hint.get_rect(center=(width // 2, height // 2 + 140)))
+        elif self.menu_state == "settings":
+            options = [
+                ("speed", f"Speed x{self.speed_multiplier:.2f}  (Left/Right)"),
+                ("birds_enabled", f"Birds: {'On' if self.birds_enabled else 'Off'}  (Enter toggle)"),
+                ("bird_density", f"Bird density x{self.birds_density:.1f}  (Left/Right)"),
+            ]
+            self.menu_buttons = {}
+            for idx, (key, text) in enumerate(options):
+                color = (255, 255, 255) if idx == self.settings_index else (200, 200, 200)
+                surf = self.renderer.font.render(text, True, color)
+                rect = surf.get_rect(center=(width // 2, height // 2 - 20 + idx * 40))
+                self.menu_buttons[key] = rect
+                self.screen.blit(surf, rect)
+            hint = "Up/Down to select; Enter toggles; Left/Right adjusts"
+            surf_hint = self.renderer.font.render(hint, True, (210, 210, 210))
+            self.screen.blit(surf_hint, surf_hint.get_rect(center=(width // 2, height // 2 + 140)))
+        else:  # others
+            lines = [
+                "Others",
+                "(placeholder)",
+                "Press Enter/Backspace to return",
+            ]
+            for idx, text in enumerate(lines):
+                surf = self.renderer.font.render(text, True, (230, 230, 230))
+                self.screen.blit(surf, surf.get_rect(center=(width // 2, height // 2 - 20 + idx * 40)))
+
+    def _draw_challenge_overlay(self, dt: float) -> None:
+        width, height = self.screen.get_size()
+        overlay = pygame.Surface((width, height), pygame.SRCALPHA)
+        overlay.fill((30, 30, 30, 160))
+        self.screen.blit(overlay, (0, 0))
+
+        remaining = max(0.0, self.challenge_window)
+        text = self.renderer.large_font.render(f"Wind Challenge: {remaining:0.1f}s", True, (240, 240, 240))
+        self.screen.blit(text, text.get_rect(center=(width // 2, height // 2 - 40)))
+
+        # Wind cue: particles while paused (flip direction for visual cue)
+        torque_dir = -1.0 if self.challenge_direction > 0 else 1.0
+        self.renderer.wind_particles.update(dt, None, torque_dir * self.config.wind.max_torque, False)
+        self.renderer.wind_particles.draw(self.screen)
+
+        # Input indicator
+        current = "None"
+        if self.challenge_input_dir < 0:
+            current = "Left"
+        elif self.challenge_input_dir > 0:
+            current = "Right"
+        choice_txt = self.renderer.font.render(f"Detected: {current}", True, (230, 230, 230))
+        self.screen.blit(choice_txt, choice_txt.get_rect(center=(width // 2, height // 2 + 40)))
 
     def _get_input_status_lines(self) -> list[str]:
         provider = self.input_provider

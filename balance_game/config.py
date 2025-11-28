@@ -32,7 +32,8 @@ class PhysicsConfig:
     rope_radius: float = 0.07  # for visual offset
     forward_speed: float = 1.8  # m/s along the rope
     player_height: float = 1.75
-    lean_sprite_offset: float = 2
+    lean_sprite_offset: float = 0.3
+    lateral_drift: float = -2  # extra slide opposite to lean
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,27 @@ class SocketInputConfig:
 
 
 @dataclass(frozen=True)
+class ChallengeConfig:
+    """Settings for the wind judgment mini-event."""
+
+    enabled: bool = False
+    min_interval: float = 5.0
+    max_interval: float = 10.0
+    window_duration: float = 5.0
+    success_torque: float = 25.0
+    failure_torque: float = 35.0
+    counter_wind: bool = False  # player matches the indicated wind direction
+    success_lean: float = 0.85  # base radians to tip on success (edit to tune)
+    success_tilt_scale: float = 2.0  # multiplier for success_lean so you can boost easily
+    recovery_time: float = 1.2
+    recovery_input_scale: float = 0.348
+    fail_lean: float = 0.6
+    reset_delay: float = 3.0
+    wind_simulated_time: float = 0.25  # seconds to simulate wind push lean
+    player_simulated_time: float = 0.3  # seconds to simulate player's chosen lean
+
+
+@dataclass(frozen=True)
 class RenderingConfig:
     """Visual parameters for the pseudo-3D renderer."""
 
@@ -131,4 +153,5 @@ class GameConfig:
     birds: BirdConfig = field(default_factory=BirdConfig)
     brainlink: BrainLinkConfig = field(default_factory=BrainLinkConfig)
     socket_input: SocketInputConfig = field(default_factory=SocketInputConfig)
+    challenge: ChallengeConfig = field(default_factory=ChallengeConfig)
     render: RenderingConfig = field(default_factory=RenderingConfig)
