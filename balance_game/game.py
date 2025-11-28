@@ -148,7 +148,7 @@ class SceneryManager:
             color = self.cfg.cloud_color
         elif kind == "tree":
             x = self._sample_x(-15.0, 15.0, exclusion=2.0)
-            y = self.cfg.ground_plane - .45  # place trees slightly lower to hug the ground
+            y = self.cfg.ground_plane - 12.45  # place trees slightly lower to hug the ground
             height = random.uniform(3.0, 4.5)
             width = height * random.uniform(0.18, 0.28)
             color = self.cfg.tree_color
