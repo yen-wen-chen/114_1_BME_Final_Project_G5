@@ -131,8 +131,8 @@ class SceneryManager:
         return random.uniform(exclusion, maximum)
 
     def _populate(self, initial_forward: float) -> None:
-        for _ in range(26):
-            z = initial_forward + random.uniform(10.0, 90.0)
+        for _ in range(18):
+            z = initial_forward + random.uniform(30.0, 140.0)
             self.features.append(self._random_feature(z))
 
     def _random_feature(self, z: float) -> BackgroundFeature:
@@ -253,6 +253,7 @@ class WindParticleSystem:
         self.max_torque = max(1.0, abs(max_torque))
         self.screen_size = Vector2(screen_size)
         self.particles: list[WindParticle] = []
+        self.max_particles = 450
 
     def resize(self, screen_size: tuple[int, int]) -> None:
         self.screen_size = Vector2(screen_size)
@@ -278,6 +279,11 @@ class WindParticleSystem:
         count = int(to_spawn)
         if random.random() < to_spawn - count:
             count += 1
+        # Cap total particles to avoid buildup over time
+        available_slots = max(0, self.max_particles - len(self.particles))
+        if available_slots <= 0:
+            return
+        count = min(count, available_slots)
 
         direction = 1.0 if torque > 0 else -1.0
         base_speed = 220.0 + 260.0 * intensity
@@ -574,6 +580,8 @@ class Renderer:
         self._bg_scaled: Optional[tuple[tuple[int, int], pygame.Surface]] = None
         self.font, self.large_font = self._load_fonts()
         self.status_source: Optional[Callable[[], list[str]]] = None
+        self._menu_logo: Optional[pygame.Surface] = None
+        self._menu_logo_key: Optional[tuple[int, int]] = None
 
     def draw(
         self,
@@ -1045,6 +1053,8 @@ class TightropeGame:
             self.birds,
         )
         self.renderer.status_source = self._get_input_status_lines
+        self.menu_button_skins = {}
+        self._load_menu_button_skins()
         self.wind = WindManager(self.config.wind)
         self.input_provider = input_provider or KeyboardInput()
 
@@ -1069,16 +1079,89 @@ class TightropeGame:
         self.challenge_samples: list[float] = []
         self.challenge_input_dir = 0
         self.menu_buttons: dict[str, pygame.Rect] = {}
+        self.menu_options_buttons: dict[str, pygame.Rect] = {}
+        self.menu_settings_buttons: dict[str, pygame.Rect] = {}
         self.challenge_reset_timer = 0.0
         self.challenge_script: list[tuple[float, float]] = []
         self.challenge_script_timer = 0.0
         self.challenge_script_input = 0.0
         self.settings_index = 0
+        self.menu_button_skins: dict[str, pygame.Surface] = {}
+        self._load_menu_button_skins()
+        self._button_cache: dict[tuple[str, tuple[int, int], bool], pygame.Surface] = {}
 
         # keep renderer references in sync
         self.renderer.player = self.player
         self.renderer.camera = self.camera
         self.renderer.scenery = self.scenery
+
+    def _load_menu_button_skins(self) -> None:
+        """Load button background sprites for the menus."""
+        # Prefer non-colored large buttons for a cleaner look
+        asset_root = (
+            Path(__file__).resolve().parent.parent
+            / "assets"
+            / "Menu Buttons Assests"
+            / "Large Buttons"
+            / "Large Buttons"
+        )
+        mapping = {
+            "play": "Play Button.png",
+            "options": "Options Button.png",
+            "mode": "Options Button.png",
+            "settings": "Settings Button.png",
+            "others": "Menu Button.png",
+            "settings_item": "Options Button.png",
+        }
+        skins: dict[str, pygame.Surface] = {}
+        for key, filename in mapping.items():
+            path = asset_root / filename
+            if path.exists():
+                try:
+                    skins[key] = pygame.image.load(str(path)).convert_alpha()
+                except Exception:
+                    continue
+        self.menu_button_skins = skins
+
+    def _pick_skin_key(self, label: str) -> str:
+        lower = label.lower()
+        if "play" in lower:
+            return "play"
+        if "mode" in lower or "challenge" in lower or "normal" in lower:
+            return "mode"
+        if "setting" in lower:
+            return "settings"
+        if "bird" in lower or "speed" in lower:
+            return "settings_item"
+        return "others"
+
+    def _render_menu_button(
+        self,
+        label: str,
+        selected: bool,
+        target_size: tuple[int, int] = (130, 45),
+        skin_override: Optional[str] = None,
+    ) -> tuple[pygame.Surface, pygame.Rect]:
+        skin_key = skin_override or self._pick_skin_key(label)
+        cache_key = (skin_key, target_size, selected)
+        cached = self._button_cache.get(cache_key)
+        if cached:
+            return cached, cached.get_rect()
+
+        skin = self.menu_button_skins.get(skin_key)
+        if skin:
+            surf = pygame.transform.smoothscale(skin, target_size)
+        else:
+            surf = pygame.Surface(target_size, pygame.SRCALPHA)
+            surf.fill((50, 80, 120, 220))
+
+        if selected:
+            overlay = pygame.Surface(target_size, pygame.SRCALPHA)
+            overlay.fill((255, 255, 255, 50))
+            surf.blit(overlay, (0, 0))
+
+        self._button_cache[cache_key] = surf
+        return surf, surf.get_rect()
 
     def reset(self) -> None:
         self.player.reset()
@@ -1115,12 +1198,16 @@ class TightropeGame:
         self.challenge_samples = []
         self.challenge_input_dir = 0
         self.menu_buttons = {}
+        self.menu_options_buttons = {}
+        self.menu_settings_buttons = {}
         self.challenge_reset_timer = 0.0
         self.selected_mode = "challenge"
         self.challenge_script = []
         self.challenge_script_timer = 0.0
         self.challenge_script_input = 0.0
         self.settings_index = 0
+        self.menu_button_skins = {}
+        self._load_menu_button_skins()
 
     def _record_lean(self, angle: float) -> None:
         self.lean_history.append(angle)
@@ -1129,30 +1216,25 @@ class TightropeGame:
 
     def _menu_key(self, key: int) -> None:
         if self.menu_state == "main":
-            options = [
-                ("play", "Play"),
-                ("mode", f"Mode: {'Challenge' if self.selected_mode == 'challenge' else 'Normal'}"),
-                ("settings", "Settings"),
-                ("others", "Others"),
-            ]
+            options = ["play", "options", "settings"]
             if key == pygame.K_UP:
                 self.menu_index = (self.menu_index - 1) % len(options)
             elif key == pygame.K_DOWN:
                 self.menu_index = (self.menu_index + 1) % len(options)
-            elif key in (pygame.K_LEFT, pygame.K_RIGHT):
-                if options[self.menu_index][0] == "mode":
-                    self.selected_mode = "challenge" if self.selected_mode == "normal" else "normal"
             elif key in (pygame.K_RETURN, pygame.K_SPACE):
-                current = options[self.menu_index][0]
+                current = options[self.menu_index]
                 if current == "play":
                     self._start_game_from_menu()
-                elif current == "mode":
-                    self.selected_mode = "challenge" if self.selected_mode == "normal" else "normal"
+                elif current == "options":
+                    self.menu_state = "options"
                 elif current == "settings":
                     self.menu_state = "settings"
                     self.settings_index = 0
-                elif current == "others":
-                    self.menu_state = "others"
+        elif self.menu_state == "options":
+            if key in (pygame.K_LEFT, pygame.K_RIGHT):
+                self.selected_mode = "challenge" if self.selected_mode == "normal" else "normal"
+            elif key in (pygame.K_SPACE, pygame.K_BACKSPACE, pygame.K_ESCAPE):
+                self.menu_state = "main"
         elif self.menu_state == "settings":
             options = ["speed", "birds_enabled", "bird_density"]
             if key == pygame.K_UP:
@@ -1176,42 +1258,55 @@ class TightropeGame:
                 if current == "birds_enabled":
                     self.birds_enabled = not self.birds_enabled
                 else:
-                    # Hitting enter on non-toggle items exits settings for convenience.
                     self.menu_state = "main"
             elif key in (pygame.K_BACKSPACE, pygame.K_ESCAPE):
                 self.menu_state = "main"
             # Apply live updates to the active bird manager
             self.birds.enabled = self.birds_enabled
             self.birds.density = self.birds_density
-        elif self.menu_state == "others":
-            if key in (pygame.K_BACKSPACE, pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
-                self.menu_state = "main"
+            self.birds.reset(self.player.forward)
 
     def _menu_click(self, pos: tuple[int, int]) -> None:
-        if not self.menu_buttons:
-            return
-        for name, rect in self.menu_buttons.items():
-            if rect.collidepoint(pos):
-                if self.menu_state == "main":
+        if self.menu_state == "main":
+            if not self.menu_buttons:
+                return
+            for name, rect in self.menu_buttons.items():
+                if rect.collidepoint(pos):
                     if name == "play":
                         self._start_game_from_menu()
-                    elif name == "mode":
-                        self.selected_mode = "challenge" if self.selected_mode == "normal" else "normal"
+                    elif name == "options":
+                        self.menu_state = "options"
                     elif name == "settings":
                         self.menu_state = "settings"
                         self.settings_index = 0
-                    elif name == "others":
-                        self.menu_state = "others"
-                elif self.menu_state == "settings":
+                    break
+        elif self.menu_state == "options":
+            if not self.menu_options_buttons:
+                return
+            for name, rect in self.menu_options_buttons.items():
+                if rect.collidepoint(pos):
+                    if name in ("challenge", "normal"):
+                        self.selected_mode = name
+                    break
+        elif self.menu_state == "settings":
+            if not self.menu_settings_buttons:
+                return
+            for name, rect in self.menu_settings_buttons.items():
+                if rect.collidepoint(pos):
                     if name == "birds_enabled":
                         self.birds_enabled = not self.birds_enabled
-                    elif name == "bird_density":
-                        pass  # use keys to adjust density
-                    elif name == "speed":
-                        pass
+                    elif name == "speed_minus":
+                        self.speed_multiplier = max(0.5, self.speed_multiplier - 0.1)
+                    elif name == "speed_plus":
+                        self.speed_multiplier = min(2.0, self.speed_multiplier + 0.1)
+                    elif name == "density_minus":
+                        self.birds_density = max(0.2, round(self.birds_density - 0.1, 1))
+                    elif name == "density_plus":
+                        self.birds_density = min(3.0, round(self.birds_density + 0.1, 1))
                     self.birds.enabled = self.birds_enabled
                     self.birds.density = self.birds_density
-                break
+                    self.birds.reset(self.player.forward)
+                    break
 
     def _next_challenge_interval(self) -> float:
         if self.selected_mode != "challenge":
@@ -1488,51 +1583,90 @@ class TightropeGame:
         overlay.fill((0, 0, 0, 180))
         self.screen.blit(overlay, (0, 0))
 
-        title = self.renderer.large_font.render("Tightrope Balance", True, (240, 240, 240))
-        self.screen.blit(title, title.get_rect(center=(width // 2, height // 2 - 120)))
+        title_rect = None
+        logo_path = Path(__file__).resolve().parent.parent / "assets" / "Game_Logo.png"
+        if logo_path.exists():
+            try:
+                target_h = 360  # scaled logo height
+                key = (target_h, width)
+                if self.renderer._menu_logo is None or self.renderer._menu_logo_key != key:
+                    logo = pygame.image.load(str(logo_path)).convert_alpha()
+                    scale = target_h / logo.get_height()
+                    target_w = int(logo.get_width() * scale)
+                    self.renderer._menu_logo = pygame.transform.smoothscale(logo, (target_w, target_h))
+                    self.renderer._menu_logo_key = key
+                logo_scaled = self.renderer._menu_logo
+                if logo_scaled:
+                    title_rect = logo_scaled.get_rect(center=(width // 2, height // 2 - 200))
+                    self.screen.blit(logo_scaled, title_rect)
+            except Exception:
+                pass
+        if title_rect is None:
+            title = self.renderer.large_font.render("Tightrope Balance", True, (240, 240, 240))
+            title_rect = title.get_rect(center=(width // 2, height // 2 - 140))
+            self.screen.blit(title, title_rect)
 
         if self.menu_state == "main":
             option_defs = [
-                ("play", "Play"),
-                ("mode", f"Mode: {'Challenge' if self.selected_mode == 'challenge' else 'Normal'}"),
-                ("settings", "Settings"),
-                ("others", "Others"),
+                ("play", ""),
+                ("options", ""),
+                ("settings", ""),
             ]
             self.menu_buttons = {}
+            base_y = height // 2 - 50
+            button_spacing = 70
             for idx, (key, text) in enumerate(option_defs):
-                color = (255, 255, 255) if idx == self.menu_index else (200, 200, 200)
-                surf = self.renderer.font.render(text, True, color)
-                rect = surf.get_rect(center=(width // 2, height // 2 - 40 + idx * 50))
+                selected = idx == self.menu_index
+                button_surf, rect = self._render_menu_button(text, selected, target_size=(130, 45), skin_override=key)
+                rect.center = (width // 2, base_y + idx * button_spacing)
                 self.menu_buttons[key] = rect
-                self.screen.blit(surf, rect)
+                self.screen.blit(button_surf, rect)
             hint = "Up/Down select, Enter confirm, Left/Right toggles mode"
-            surf_hint = self.renderer.font.render(hint, True, (210, 210, 210))
-            self.screen.blit(surf_hint, surf_hint.get_rect(center=(width // 2, height // 2 + 140)))
+            hint_font = pygame.font.Font(None, 26)
+            surf_hint = hint_font.render(hint, True, (210, 210, 210))
+            rect = surf_hint.get_rect(center=(width // 2, height - 36))
+            self.screen.blit(surf_hint, rect)
+        elif self.menu_state == "options":
+            self.menu_options_buttons = {}
+            title = self.renderer.font.render("Options", True, (230, 230, 230))
+            self.screen.blit(title, title.get_rect(center=(width // 2, height // 2 - 120)))
+            mode_text = self.renderer.font.render(f"Mode: {('Challenge' if self.selected_mode=='challenge' else 'Normal')}", True, (240, 240, 240))
+            self.screen.blit(mode_text, mode_text.get_rect(center=(width // 2, height // 2 - 20)))
+            hint_lines = [
+                "Press Left/Right to toggle Challenge/Normal.",
+                "Press Space to return to Main Menu.",
+            ]
+            hint_font = pygame.font.Font(None, 26)
+            for i, line in enumerate(hint_lines):
+                surf_hint = hint_font.render(line, True, (210, 210, 210))
+                rect = surf_hint.get_rect(center=(width // 2, height // 2 + 60 + i * 28))
+                self.screen.blit(surf_hint, rect)
         elif self.menu_state == "settings":
             options = [
-                ("speed", f"Speed x{self.speed_multiplier:.2f}  (Left/Right)"),
-                ("birds_enabled", f"Birds: {'On' if self.birds_enabled else 'Off'}  (Enter toggle)"),
-                ("bird_density", f"Bird density x{self.birds_density:.1f}  (Left/Right)"),
+                ("speed", f"Speed x{self.speed_multiplier:.2f}"),
+                ("birds_enabled", f"Birds: {'On' if self.birds_enabled else 'Off'}"),
+                ("bird_density", f"Bird density x{self.birds_density:.1f}"),
             ]
-            self.menu_buttons = {}
+            self.menu_settings_buttons = {}
+            base_y = height // 2 - 40
+            button_spacing = 65
+            title = self.renderer.font.render("Settings", True, (230, 230, 230))
+            self.screen.blit(title, title.get_rect(center=(width // 2, base_y - 60)))
             for idx, (key, text) in enumerate(options):
                 color = (255, 255, 255) if idx == self.settings_index else (200, 200, 200)
                 surf = self.renderer.font.render(text, True, color)
-                rect = surf.get_rect(center=(width // 2, height // 2 - 20 + idx * 40))
-                self.menu_buttons[key] = rect
+                rect = surf.get_rect(center=(width // 2, base_y + idx * button_spacing))
+                self.menu_settings_buttons[key] = rect
                 self.screen.blit(surf, rect)
-            hint = "Up/Down to select; Enter toggles; Left/Right adjusts"
-            surf_hint = self.renderer.font.render(hint, True, (210, 210, 210))
-            self.screen.blit(surf_hint, surf_hint.get_rect(center=(width // 2, height // 2 + 140)))
-        else:  # others
-            lines = [
-                "Others",
-                "(placeholder)",
-                "Press Enter/Backspace to return",
+            hint_lines = [
+                "Left/Right adjust values, Enter toggles Birds.",
+                "Space/Back to main menu.",
             ]
-            for idx, text in enumerate(lines):
-                surf = self.renderer.font.render(text, True, (230, 230, 230))
-                self.screen.blit(surf, surf.get_rect(center=(width // 2, height // 2 - 20 + idx * 40)))
+            hint_font = pygame.font.Font(None, 24)
+            for i, line in enumerate(hint_lines):
+                surf_hint = hint_font.render(line, True, (210, 210, 210))
+                rect = surf_hint.get_rect(center=(width // 2, height - 60 + i * 22))
+                self.screen.blit(surf_hint, rect)
 
     def _draw_challenge_overlay(self, dt: float) -> None:
         width, height = self.screen.get_size()
